@@ -1,0 +1,11 @@
+[package]
+name = "swusb-usb-linux"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+swusb-core = { path = "../swusb-core" }
+
+[lints]
+workspace = true

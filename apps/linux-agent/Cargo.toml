@@ -1,0 +1,11 @@
+[package]
+name = "swusb-linux-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+swusb-usb-linux = { path = "../../crates/swusb-usb-linux" }
+
+[lints]
+workspace = true

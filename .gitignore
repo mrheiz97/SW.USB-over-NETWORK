@@ -1,0 +1,7 @@
+/target/
+AGENTS.md
+**/AGENTS.md
+*.pdb
+*.user
+.idea/
+.vscode/

@@ -1,0 +1,21 @@
+[workspace]
+members = [
+    "crates/swusb-core",
+    "crates/swusb-descriptors",
+    "crates/swusb-usb-linux",
+    "apps/linux-agent",
+]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+repository = "https://github.com/mrheiz97/SW.USB-over-NETWORK"
+
+[workspace.lints.rust]
+unsafe_code = "forbid"
+
+[workspace.lints.clippy]
+all = "warn"
+pedantic = "warn"
