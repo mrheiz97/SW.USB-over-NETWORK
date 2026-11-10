@@ -186,8 +186,9 @@ impl Backend for Device {
         let actual = self.0.read(&mut descriptors)?;
         descriptors.truncate(actual);
         let configuration = self.control_byte(0x80, 8, 0)?; // GET_CONFIGURATION
-        let alternate = self.control_byte(0x81, 10, u16::from(plan.interface))?; // GET_INTERFACE
-        topology::validate(&descriptors, configuration, alternate, plan)
+        topology::validate(&descriptors, configuration, plan, || {
+            self.control_byte(0x81, 10, u16::from(plan.interface)) // GET_INTERFACE
+        })
     }
 
     fn submit_endpoint(

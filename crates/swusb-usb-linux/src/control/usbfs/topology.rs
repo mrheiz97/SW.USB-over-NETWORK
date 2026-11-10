@@ -48,15 +48,29 @@ fn active_configuration(descriptors: &[u8], configuration: u8) -> io::Result<&[u
 pub(super) fn validate(
     descriptors: &[u8],
     configuration: u8,
-    alternate: u8,
     plan: EndpointReadPlan,
+    read_alternate: impl FnOnce() -> io::Result<u8>,
 ) -> io::Result<()> {
-    if alternate != plan.alternate_setting {
-        return Err(invalid("USB alternate setting changed"));
-    }
     let configuration = active_configuration(descriptors, configuration)?;
     let parsed = parse_descriptors(configuration)
         .map_err(|error| io::Error::new(io::ErrorKind::InvalidData, error))?;
+    let mut alternates = parsed.iter().filter_map(|descriptor| match descriptor {
+        Descriptor::Interface(interface) if interface.number == plan.interface => {
+            Some(interface.alternate_setting)
+        }
+        _ => None,
+    });
+    let first = alternates
+        .next()
+        .ok_or_else(|| invalid("USB interface is absent from the active configuration"))?;
+    let alternate = if alternates.next().is_some() {
+        read_alternate()?
+    } else {
+        first
+    };
+    if alternate != plan.alternate_setting {
+        return Err(invalid("USB alternate setting changed"));
+    }
     let mut current = None;
     let mut active_seen = false;
     let mut found = false;
@@ -138,23 +152,42 @@ mod tests {
     #[test]
     fn validates_bulk_and_interrupt_metadata_on_the_active_setting() {
         let mut bytes = cache(&RECORDS);
-        validate(&bytes, 3, 1, PLAN).unwrap();
+        validate(&bytes, 3, PLAN, || Ok(1)).unwrap();
         bytes[18 + 9 + 18 + 3] = 3;
-        assert!(validate(&bytes, 3, 1, PLAN).is_err());
+        assert!(validate(&bytes, 3, PLAN, || Ok(1)).is_err());
         let plan = EndpointReadPlan {
             kind: EndpointReadKind::Interrupt,
             ..PLAN
         };
-        validate(&bytes, 3, 1, plan).unwrap();
-        assert!(validate(&bytes, 3, 0, plan).is_err());
-        assert!(validate(&bytes, 1, 1, plan).is_err());
-        assert!(validate(&bytes[..bytes.len() - 1], 3, 1, plan).is_err());
+        validate(&bytes, 3, plan, || Ok(1)).unwrap();
+        assert!(validate(&bytes, 3, plan, || Ok(0)).is_err());
+        assert!(validate(&bytes, 1, plan, || Ok(1)).is_err());
+        assert!(validate(&bytes[..bytes.len() - 1], 3, plan, || Ok(1)).is_err());
+        assert_eq!(
+            validate(&bytes, 3, plan, || Err(io::ErrorKind::TimedOut.into()))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::TimedOut
+        );
     }
 
     #[test]
     fn rejects_aliases_even_on_an_inactive_setting_of_another_interface() {
         let mut records = RECORDS.to_vec();
         records.extend_from_slice(&[9, 4, 5, 2, 1, 0xff, 0, 0, 0, 7, 5, 0x82, 2, 0, 2, 0]);
-        assert!(validate(&cache(&records), 3, 1, PLAN).is_err());
+        assert!(validate(&cache(&records), 3, PLAN, || Ok(1)).is_err());
+    }
+
+    #[test]
+    fn sole_alternate_setting_does_not_require_a_device_query() {
+        let bytes = cache(&[9, 4, 4, 0, 1, 7, 0, 0, 0, 7, 5, 0x82, 2, 0, 2, 0]);
+        let plan = EndpointReadPlan {
+            alternate_setting: 0,
+            ..PLAN
+        };
+        validate(&bytes, 3, plan, || {
+            panic!("sole alternate setting is known")
+        })
+        .unwrap();
     }
 }

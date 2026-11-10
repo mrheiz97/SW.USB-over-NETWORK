@@ -135,8 +135,10 @@ the connection unsealed.
 A caller explicitly claims one interface, seals the handle, then uses
 `prepare_endpoint_read` and `run_endpoint_read` on that connection.
 The backend reads at most 128 KiB of cached descriptors from the same fd.
-It checks the active configuration and alternate setting using bounded
-standard IN control requests. It rejects a changed endpoint type, packet
+It checks the active configuration using a bounded standard IN control
+request. It uses the cached alternate setting when the interface declares
+only one, and uses `GET_INTERFACE` when several are declared. It rejects a
+changed endpoint type, packet
 size, or an address that also occurs on another interface in the active
 configuration. These checks do not lock out external reconfiguration.
 If the kernel no longer recognizes the claim, the sealed handle cannot
@@ -154,3 +156,11 @@ short responses, including zero bytes, and rejects oversized counts.
 The transfer timeout excludes the descriptor and control preflight. A
 cancellation observed after submission discards the returned data.
 Cancellation of an in-flight kernel transfer remains pending.
+
+The VEVOR KI720A plotter (`0483:5750`) reported a single alternate setting
+on its unbound interface 0. Its `GET_INTERFACE` returned no bytes, so the
+initial strict preflight did not submit endpoint reads. With the sole
+setting resolved from the cache, Interrupt IN `81` and Bulk IN `82`
+both reached the kernel and returned `ETIMEDOUT` after about 1.5 seconds.
+The claim, seal and release all succeeded. No OUT transfer was sent, and
+interface 0 was unbound again after release.
