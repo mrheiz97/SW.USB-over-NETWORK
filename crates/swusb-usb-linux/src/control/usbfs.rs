@@ -1,6 +1,6 @@
 use std::{
     ffi::{c_int, c_void},
-    fs::OpenOptions,
+    fs::{File, OpenOptions},
     io,
     os::{fd::AsRawFd, unix::fs::FileTypeExt},
 };
@@ -45,38 +45,48 @@ unsafe extern "C" {
     fn ioctl(fd: c_int, request: IoctlRequest, ...) -> c_int;
 }
 
-pub(super) fn submit(path: &str, setup: Setup, timeout: u32, data: &mut [u8]) -> io::Result<usize> {
-    // usbdev_do_ioctl requires FMODE_WRITE even for IN requests.
-    let file = OpenOptions::new().read(true).write(true).open(path)?;
-    if !file.metadata()?.file_type().is_char_device() {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "usbfs path is not a character device",
-        ));
+pub(super) struct Device(File);
+
+impl Device {
+    pub(super) fn open(path: &str) -> io::Result<Self> {
+        // usbdev_do_ioctl requires FMODE_WRITE even for IN requests.
+        let file = OpenOptions::new().read(true).write(true).open(path)?;
+        if !file.metadata()?.file_type().is_char_device() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "usbfs path is not a character device",
+            ));
+        }
+        Ok(Self(file))
     }
-    let length = u16::try_from(data.len())
-        .ok()
-        .filter(|&length| length == setup.length)
-        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "USB buffer length mismatch"))?;
-    let mut transfer = CtrlTransfer {
-        request_type: setup.request_type,
-        request: setup.request,
-        value: setup.value,
-        index: setup.index,
-        length,
-        timeout,
-        data: data.as_mut_ptr().cast(),
-    };
-    // ioctl takes signed int on musl, so preserve the high direction bits.
-    #[cfg(target_env = "musl")]
-    let request = IoctlRequest::from_ne_bytes(USBDEVFS_CONTROL.to_ne_bytes());
-    #[cfg(not(target_env = "musl"))]
-    let request = IoctlRequest::from(USBDEVFS_CONTROL);
-    // SAFETY: the fd remains open, the argument has the Linux UAPI layout, and
-    // the writable buffer covers wLength bytes for the entire synchronous call.
-    #[allow(unsafe_code)]
-    let result = unsafe { ioctl(file.as_raw_fd(), request, &raw mut transfer) };
-    usize::try_from(result).map_err(|_| io::Error::last_os_error())
+
+    pub(super) fn submit(&self, setup: Setup, timeout: u32, data: &mut [u8]) -> io::Result<usize> {
+        let length = u16::try_from(data.len())
+            .ok()
+            .filter(|&length| length == setup.length)
+            .ok_or_else(|| {
+                io::Error::new(io::ErrorKind::InvalidInput, "USB buffer length mismatch")
+            })?;
+        let mut transfer = CtrlTransfer {
+            request_type: setup.request_type,
+            request: setup.request,
+            value: setup.value,
+            index: setup.index,
+            length,
+            timeout,
+            data: data.as_mut_ptr().cast(),
+        };
+        // ioctl takes signed int on musl, so preserve the high direction bits.
+        #[cfg(target_env = "musl")]
+        let request = IoctlRequest::from_ne_bytes(USBDEVFS_CONTROL.to_ne_bytes());
+        #[cfg(not(target_env = "musl"))]
+        let request = IoctlRequest::from(USBDEVFS_CONTROL);
+        // SAFETY: the fd remains open, the argument has the Linux UAPI layout, and
+        // the writable buffer covers wLength bytes for the entire synchronous call.
+        #[allow(unsafe_code)]
+        let result = unsafe { ioctl(self.0.as_raw_fd(), request, &raw mut transfer) };
+        usize::try_from(result).map_err(|_| io::Error::last_os_error())
+    }
 }
 
 #[cfg(test)]
@@ -85,12 +95,9 @@ fn non_usb_character_device_rejects_ioctl() {
     use super::ControlRead;
 
     let mut data = [0; 18];
-    let error = submit(
-        "/dev/null",
-        ControlRead::DeviceDescriptor.setup(),
-        500,
-        &mut data,
-    )
-    .unwrap_err();
+    let device = Device::open("/dev/null").unwrap();
+    let error = device
+        .submit(ControlRead::DeviceDescriptor.setup(), 500, &mut data)
+        .unwrap_err();
     assert_eq!(error.raw_os_error(), Some(25)); // Linux ENOTTY
 }

@@ -1,6 +1,9 @@
 //! Synchronous USB standard reads on endpoint zero.
 
-use std::io;
+use std::{
+    io,
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 /// The device-recipient standard reads supported by the first transfer backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -36,6 +39,79 @@ struct Setup {
     length: u16,
 }
 
+/// A one-way cancellation signal for a control read.
+#[derive(Debug, Default)]
+pub struct Cancellation(AtomicBool);
+
+impl Cancellation {
+    /// Requests cancellation. An ioctl already in progress can still finish.
+    pub fn cancel(&self) {
+        self.0.store(true, Ordering::Relaxed);
+    }
+
+    fn check(&self) -> io::Result<()> {
+        if self.0.load(Ordering::Relaxed) {
+            return Err(io::Error::new(
+                io::ErrorKind::Interrupted,
+                "USB control read cancelled",
+            ));
+        }
+        Ok(())
+    }
+}
+
+type Submit = dyn FnMut(Setup, u32, &mut [u8]) -> io::Result<usize> + Send;
+
+/// A handle to one USB device connection, kept open across standard reads.
+///
+/// After a disconnect, enumerate again and open a new handle. This handle
+/// continues to refer to the original connection even if its address is reused.
+pub struct ControlDevice {
+    submit: Box<Submit>,
+}
+
+impl ControlDevice {
+    /// Opens the usbfs node for a bus and address obtained from fresh inventory.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid address, an unavailable platform, or if
+    /// the node cannot be opened.
+    pub fn open(bus: u16, address: u16) -> io::Result<Self> {
+        let device = platform::Device::open(&device_path(bus, address)?)?;
+        Ok(Self {
+            submit: Box::new(move |setup, timeout, data| device.submit(setup, timeout, data)),
+        })
+    }
+
+    /// Performs one standard read with a timeout in milliseconds.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid timeouts, OS failures, or invalid responses.
+    pub fn read(&mut self, request: ControlRead, timeout_ms: u32) -> io::Result<Vec<u8>> {
+        execute(request, timeout_ms, None, &mut self.submit)
+    }
+
+    /// Performs a read with cooperative cancellation.
+    ///
+    /// A cancellation observed before submission skips the ioctl. One observed
+    /// after submission discards its result when the synchronous ioctl returns.
+    ///
+    /// # Errors
+    ///
+    /// Returns the same errors as [`Self::read`], or [`io::ErrorKind::Interrupted`]
+    /// when cancellation is observed.
+    pub fn read_cancellable(
+        &mut self,
+        request: ControlRead,
+        timeout_ms: u32,
+        cancellation: &Cancellation,
+    ) -> io::Result<Vec<u8>> {
+        execute(request, timeout_ms, Some(cancellation), &mut self.submit)
+    }
+}
+
 /// Issues one standard read to a Linux usbfs device at the given bus and address.
 /// The timeout applies to the USB transfer itself, in milliseconds.
 ///
@@ -44,21 +120,26 @@ struct Setup {
 /// Returns an error for invalid addresses or timeouts (outside 1..=5000 ms),
 /// unavailable platforms, OS failures, or malformed/short responses.
 pub fn read(bus: u16, address: u16, request: ControlRead, timeout_ms: u32) -> io::Result<Vec<u8>> {
+    let path = device_path(bus, address)?;
+    execute(request, timeout_ms, None, |setup, timeout, data| {
+        platform::Device::open(&path)?.submit(setup, timeout, data)
+    })
+}
+
+fn device_path(bus: u16, address: u16) -> io::Result<String> {
     if !(1..=999).contains(&bus) || !(1..=127).contains(&address) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
             "invalid USB bus or address",
         ));
     }
-    let path = format!("/dev/bus/usb/{bus:03}/{address:03}");
-    execute(request, timeout_ms, |setup, timeout, data| {
-        platform::submit(&path, setup, timeout, data)
-    })
+    Ok(format!("/dev/bus/usb/{bus:03}/{address:03}"))
 }
 
 fn execute(
     request: ControlRead,
     timeout_ms: u32,
+    cancellation: Option<&Cancellation>,
     submit: impl FnOnce(Setup, u32, &mut [u8]) -> io::Result<usize>,
 ) -> io::Result<Vec<u8>> {
     if !(1..=5000).contains(&timeout_ms) {
@@ -69,7 +150,14 @@ fn execute(
     }
     let setup = request.setup();
     let mut data = vec![0; usize::from(setup.length)];
-    let actual = submit(setup, timeout_ms, &mut data)?;
+    if let Some(signal) = cancellation {
+        signal.check()?;
+    }
+    let result = submit(setup, timeout_ms, &mut data);
+    if let Some(signal) = cancellation {
+        signal.check()?;
+    }
+    let actual = result?;
     if actual != data.len() {
         return Err(io::Error::new(
             io::ErrorKind::InvalidData,
@@ -110,11 +198,19 @@ mod platform;
 mod platform {
     use super::{Setup, io};
 
-    pub(super) fn submit(_: &str, _: Setup, _: u32, _: &mut [u8]) -> io::Result<usize> {
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            "USB control reads require supported Linux usbfs",
-        ))
+    pub(super) enum Device {}
+
+    impl Device {
+        pub(super) fn open(_: &str) -> io::Result<Self> {
+            Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "USB control reads require supported Linux usbfs",
+            ))
+        }
+
+        pub(super) fn submit(&self, _: Setup, _: u32, _: &mut [u8]) -> io::Result<usize> {
+            match *self {}
+        }
     }
 }
 

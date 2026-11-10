@@ -24,9 +24,22 @@ request has a fixed response size and a transfer timeout of 1–5000 ms. The CLI
 uses 1000 ms. Bus and device numbers can change after unplugging or reconnecting.
 Use fresh inventory before addressing a device.
 
+For repeated reads, `ControlDevice` keeps one usbfs file descriptor open.
+After unplugging, that handle stays associated with the disconnected device.
+Enumerate again and open a new handle after reconnecting, even if Linux
+reuses the bus and device numbers.
+
+`Cancellation` skips a read if cancellation is observed before submission.
+If it is observed while the synchronous ioctl runs, the caller receives
+`Interrupted` after the ioctl returns and its result is discarded. Cancellation
+does not interrupt the kernel transfer itself. The configured USB timeout
+still applies.
+
 Linux requires a read/write file descriptor for the ioctl. Prefer narrow
 device-node permissions. The transfer path leaves interface and driver bindings
-alone. Simulator tests cover setup fields, responses and error propagation.
+alone. Simulator tests cover setup fields, responses, unplug and reconnect at
+the same address, recovery after a timeout, and cancellation before and during
+submission.
 
 The Linux FFI boundary uses the C layout and ioctl encoding for the supported
 architectures. Compile-time assertions check the layout. The file descriptor
@@ -40,5 +53,20 @@ A test client using the same backend read configuration `01`, which matched
 sysfs, and device status `00 00`. The stick's `usb-storage` interface binding
 matched before and after the two reads.
 
-Next steps include interface ownership, bounded queues, cancellation, hotplug,
-and bulk and interrupt transfers.
+On the same board, unplugging the stick caused its open handle to return
+`ENODEV`. The old handle still returned `ENODEV` after reconnecting.
+A new handle read configuration `01` and status `00 00` with `usb-storage`
+bound. Cancellation before submission returned `Interrupted`, and the
+next read succeeded. Twelve reads with a 1 ms timeout all completed
+successfully, so the hardware test did not reproduce a timeout.
+
+A separate ARM64 test on the board used `strace` fault injection to make the
+first usbfs ioctl return `ETIMEDOUT`. The API reported `TimedOut` and a second
+read on the same handle succeeded. In a second run, the USB read succeeded in
+the kernel and `strace` delayed delivery of its result. A cancellation issued
+during that delay caused the API to discard the result and return
+`Interrupted`. A subsequent read succeeded and `usb-storage` remained
+bound. These tests cover application behavior at the syscall boundary.
+
+Next steps include interface ownership, bounded queues, cancellation of
+in-flight kernel transfers, and bulk and interrupt transfers.
