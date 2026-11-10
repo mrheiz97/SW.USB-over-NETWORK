@@ -161,3 +161,84 @@ fn rejects_invalid_inputs_before_submitting() {
         );
     }
 }
+
+#[test]
+fn queue_is_bounded_and_releases_a_slot_after_running() {
+    let mut port = SimulatedPort::default();
+    port.connect(1);
+    let mut queue = ControlQueue::new(port.open().unwrap());
+    let request = ControlRead::ConfigurationValue;
+    for timeout in [0, 5001] {
+        assert_eq!(
+            queue.enqueue(request, timeout).unwrap_err().kind(),
+            io::ErrorKind::InvalidInput
+        );
+    }
+    for _ in 0..ControlQueue::CAPACITY {
+        queue.enqueue(request, 500).unwrap();
+    }
+    assert_eq!(
+        queue.enqueue(request, 500).unwrap_err().kind(),
+        io::ErrorKind::WouldBlock
+    );
+    assert_eq!(queue.run_next().unwrap().result.unwrap(), [1]);
+    queue.enqueue(request, 500).unwrap();
+    for _ in 0..ControlQueue::CAPACITY {
+        assert_eq!(queue.run_next().unwrap().result.unwrap(), [1]);
+    }
+    assert!(queue.run_next().is_none());
+}
+
+#[test]
+fn queue_preserves_order_and_skips_a_cancelled_request() {
+    use ControlRead::{ConfigurationValue, DeviceDescriptor, DeviceStatus};
+
+    let mut submitted = [DeviceDescriptor, DeviceStatus].into_iter();
+    let mut queue = ControlQueue::new(ControlDevice {
+        submit: Box::new(move |setup, _, data| {
+            assert_eq!(setup, submitted.next().unwrap().setup());
+            if setup.request == 6 {
+                data[..2].copy_from_slice(&[18, 1]);
+            }
+            Ok(data.len())
+        }),
+    });
+    queue.enqueue(DeviceDescriptor, 500).unwrap();
+    let cancelled = queue.enqueue(ConfigurationValue, 500).unwrap();
+    queue.enqueue(DeviceStatus, 500).unwrap();
+    cancelled.cancel();
+
+    let first = queue.run_next().unwrap();
+    assert_eq!(first.request, DeviceDescriptor);
+    assert_eq!(first.result.unwrap().len(), 18);
+    let second = queue.run_next().unwrap();
+    assert_eq!(second.request, ConfigurationValue);
+    assert_eq!(
+        second.result.unwrap_err().kind(),
+        io::ErrorKind::Interrupted
+    );
+    let third = queue.run_next().unwrap();
+    assert_eq!(third.request, DeviceStatus);
+    assert_eq!(third.result.unwrap(), [0, 0]);
+    assert!(queue.run_next().is_none());
+}
+
+#[test]
+fn queued_reads_keep_their_timeout_and_original_connection() {
+    let mut port = SimulatedPort::default();
+    port.connect(1);
+    let mut queue = ControlQueue::new(port.open().unwrap());
+    let request = ControlRead::ConfigurationValue;
+    queue.enqueue(request, 199).unwrap();
+    queue.enqueue(request, 500).unwrap();
+    assert_eq!(
+        queue.run_next().unwrap().result.unwrap_err().kind(),
+        io::ErrorKind::TimedOut
+    );
+    port.unplug();
+    port.connect(2);
+    assert_eq!(
+        queue.run_next().unwrap().result.unwrap_err().kind(),
+        io::ErrorKind::NotConnected
+    );
+}

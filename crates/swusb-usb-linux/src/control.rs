@@ -5,6 +5,9 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
 };
 
+mod queue;
+pub use queue::{ControlCompletion, ControlQueue};
+
 /// The device-recipient standard reads supported by the first transfer backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ControlRead {
@@ -142,12 +145,7 @@ fn execute(
     cancellation: Option<&Cancellation>,
     submit: impl FnOnce(Setup, u32, &mut [u8]) -> io::Result<usize>,
 ) -> io::Result<Vec<u8>> {
-    if !(1..=5000).contains(&timeout_ms) {
-        return Err(io::Error::new(
-            io::ErrorKind::InvalidInput,
-            "USB timeout must be 1..=5000 ms",
-        ));
-    }
+    validate_timeout(timeout_ms)?;
     let setup = request.setup();
     let mut data = vec![0; usize::from(setup.length)];
     if let Some(signal) = cancellation {
@@ -171,6 +169,17 @@ fn execute(
         ));
     }
     Ok(data)
+}
+
+fn validate_timeout(timeout_ms: u32) -> io::Result<()> {
+    if (1..=5000).contains(&timeout_ms) {
+        Ok(())
+    } else {
+        Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "USB timeout must be 1..=5000 ms",
+        ))
+    }
 }
 
 // These Linux architectures use the asm-generic _IOC bit layout.

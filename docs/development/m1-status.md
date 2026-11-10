@@ -68,5 +68,13 @@ during that delay caused the API to discard the result and return
 `Interrupted`. A subsequent read succeeded and `usb-storage` remained
 bound. These tests cover application behavior at the syscall boundary.
 
-Next steps include interface ownership, bounded queues, cancellation of
-in-flight kernel transfers, and bulk and interrupt transfers.
+`ControlQueue` holds up to 16 pending reads on one connection. The caller
+advances the queue in FIFO order. Each read has its own cancellation signal
+and USB timeout. The timeout starts at submission, and cancellation does not
+free a slot until the caller dequeues the request. The `read-controls` command
+uses this queue for all three standard reads.
+On the DragonBoard, `read-controls` returned the Intenso stick's descriptor,
+configuration `01`, and status `00 00` with `usb-storage` bound throughout.
+
+Next steps include interface ownership, cancellation of in-flight kernel
+transfers, and bulk and interrupt transfers.

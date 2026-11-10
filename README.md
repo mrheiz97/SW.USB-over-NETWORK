@@ -42,10 +42,12 @@ Use the bus and device numbers from `list`:
 
 ```sh
 cargo run -p swusb-linux-agent -- read-device 001 002
+cargo run -p swusb-linux-agent -- read-controls 001 002
 ```
 
 Linux requires read and write access to the usbfs device node for the ioctl.
-The command sends one standard device descriptor read and prints the bytes.
+`read-device` prints the device descriptor. `read-controls` reads the
+descriptor, active configuration, and device status over one connection.
 
 See [development status](docs/development/m1-status.md), the
 [architecture](docs/architecture/m1-native-core.md), and

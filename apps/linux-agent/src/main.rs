@@ -1,17 +1,21 @@
 use std::{env, path::Path};
 
+use swusb_usb_linux::control::{ControlDevice, ControlQueue, ControlRead, read};
+
 fn main() {
     let args: Vec<_> = env::args().skip(1).collect();
     let root = match args.as_slice() {
         [] => Path::new(swusb_usb_linux::DEFAULT_SYSFS_ROOT),
         [command] if command == "list" => Path::new(swusb_usb_linux::DEFAULT_SYSFS_ROOT),
         [command, path] if command == "list" => Path::new(path),
-        [command, bus, address] if command == "read-device" => {
-            read_device(bus, address);
+        [command, bus, address] if matches!(command.as_str(), "read-device" | "read-controls") => {
+            read_controls(bus, address, command == "read-controls");
             return;
         }
         _ => {
-            eprintln!("usage: swusb-linux-agent [list [SYSFS_ROOT] | read-device BUS ADDRESS]");
+            eprintln!(
+                "usage: swusb-linux-agent [list [SYSFS_ROOT] | read-device BUS ADDRESS | read-controls BUS ADDRESS]"
+            );
             std::process::exit(2);
         }
     };
@@ -65,18 +69,42 @@ fn main() {
     }
 }
 
-fn read_device(bus: &str, address: &str) {
-    use swusb_usb_linux::control::{ControlRead, read};
-
+fn read_controls(bus: &str, address: &str, batch: bool) {
     let (Ok(bus), Ok(address)) = (bus.parse(), address.parse()) else {
         eprintln!("BUS and ADDRESS must be decimal USB numbers");
         std::process::exit(2);
     };
-    match read(bus, address, ControlRead::DeviceDescriptor, 1000) {
-        Ok(bytes) => println!("Device descriptor: {bytes:02x?}"),
-        Err(error) => {
-            eprintln!("USB control read failed: {error}");
-            std::process::exit(1);
-        }
+    let result = if batch {
+        read_batch(bus, address)
+    } else {
+        read(bus, address, ControlRead::DeviceDescriptor, 1000)
+            .map(|bytes| println!("Device descriptor: {bytes:02x?}"))
+    };
+    if let Err(error) = result {
+        eprintln!("USB control read failed: {error}");
+        std::process::exit(1);
     }
+}
+
+fn read_batch(bus: u16, address: u16) -> std::io::Result<()> {
+    let mut queue = ControlQueue::new(ControlDevice::open(bus, address)?);
+    for request in [
+        ControlRead::DeviceDescriptor,
+        ControlRead::ConfigurationValue,
+        ControlRead::DeviceStatus,
+    ] {
+        queue.enqueue(request, 1000)?;
+    }
+    while let Some(completion) = queue.run_next() {
+        let label = match completion.request {
+            ControlRead::DeviceDescriptor => "GET_DESCRIPTOR",
+            ControlRead::ConfigurationValue => "GET_CONFIGURATION",
+            ControlRead::DeviceStatus => "GET_STATUS",
+        };
+        let bytes = completion
+            .result
+            .inspect_err(|_| eprintln!("{label} failed"))?;
+        println!("{label}: {bytes:02x?}");
+    }
+    Ok(())
 }
