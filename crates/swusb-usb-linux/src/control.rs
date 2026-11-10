@@ -1,12 +1,18 @@
 //! Synchronous USB standard reads on endpoint zero.
 
 use std::{
+    collections::BTreeMap,
     io,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 mod queue;
+mod simulator;
 pub use queue::{ControlCompletion, ControlQueue};
+pub use simulator::{PreparedEndpointRead, SimulatedDevice};
 
 /// The device-recipient standard reads supported by the first transfer backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +86,7 @@ trait Backend: Send {
 /// continues to refer to the original connection even if its address is reused.
 pub struct ControlDevice {
     backend: Box<dyn Backend>,
-    claimed: [bool; 256],
+    claimed: BTreeMap<u8, Arc<()>>,
 }
 
 impl ControlDevice {
@@ -98,7 +104,7 @@ impl ControlDevice {
     fn with_backend(backend: impl Backend + 'static) -> Self {
         Self {
             backend: Box::new(backend),
-            claimed: [false; 256],
+            claimed: BTreeMap::new(),
         }
     }
 
@@ -110,8 +116,7 @@ impl ControlDevice {
     /// Returns `AlreadyExists` for a duplicate local claim, or an OS error
     /// if the interface cannot be claimed.
     pub fn claim_interface(&mut self, interface: u8) -> io::Result<()> {
-        let claimed = &mut self.claimed[usize::from(interface)];
-        if *claimed {
+        if self.claimed.contains_key(&interface) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "USB interface is already claimed by this handle",
@@ -119,7 +124,7 @@ impl ControlDevice {
         }
         self.backend
             .change_claim(InterfaceOperation::Claim, interface)?;
-        *claimed = true;
+        self.claimed.insert(interface, Arc::new(()));
         Ok(())
     }
 
@@ -131,8 +136,7 @@ impl ControlDevice {
     /// Returns `NotFound` for an interface this handle did not claim, or an
     /// OS error if release fails. A failed release leaves the claim recorded.
     pub fn release_interface(&mut self, interface: u8) -> io::Result<()> {
-        let claimed = &mut self.claimed[usize::from(interface)];
-        if !*claimed {
+        if !self.claimed.contains_key(&interface) {
             return Err(io::Error::new(
                 io::ErrorKind::NotFound,
                 "USB interface is not claimed by this handle",
@@ -140,7 +144,7 @@ impl ControlDevice {
         }
         self.backend
             .change_claim(InterfaceOperation::Release, interface)?;
-        *claimed = false;
+        self.claimed.remove(&interface);
         Ok(())
     }
 

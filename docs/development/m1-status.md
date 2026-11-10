@@ -108,5 +108,22 @@ The simulator resolved both transfer types. On the DragonBoard, the planner
 resolved the Intenso stick's Bulk IN endpoint `81` on interface 0 with a
 512-byte maximum packet and left `usb-storage` bound.
 
-Next steps include tying plans to an owned, current connection and implementing
-endpoint data transfers with cancellation of in-flight kernel transfers.
+`SimulatedDevice` combines endpoint planning with explicit interface claims
+and a FIFO of up to 16 scripted responses. Reads consume responses in order
+per endpoint. Short responses, including zero-length responses, are valid.
+Timeout, cancellation and insufficient read length preserve the scripted
+response for a subsequent read. This simulator does not access usbfs.
+
+Prepared simulator reads are tied to the exact claim that authorized them.
+Releasing and reclaiming an interface invalidates its old requests. A
+replacement connection also rejects those requests, even with the same
+bus, address and endpoint. Rejected reads leave the next response intact.
+
+The Linux endpoint path must enforce explicit ownership at submission.
+Linux usbfs can attempt an implicit claim if the kernel no longer recognizes
+the claim when an endpoint request arrives. A candidate Linux design is
+to acquire the explicitly requested interfaces, then apply
+`USBDEVFS_DROP_PRIVILEGES` with a zero mask on that handle. This preserves
+existing claims and prevents new ones, including implicit reclaims. The
+transition is irreversible for that handle. Kernel transfers and
+cancellation of in-flight transfers remain pending.
