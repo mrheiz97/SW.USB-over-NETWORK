@@ -1,6 +1,7 @@
 //! Linux sysfs inventory and read-only USB control transfers.
 
 pub mod control;
+pub mod endpoint;
 
 use std::{
     fmt, fs, io,
@@ -153,8 +154,8 @@ fn read_endpoints(interface: &Path) -> Result<Vec<UsbEndpoint>, InventoryError> 
         result.push(UsbEndpoint {
             address: hex(&path, "bEndpointAddress")?,
             attributes: hex(&path, "bmAttributes")?,
-            max_packet_size: decimal(&path, "wMaxPacketSize")?,
-            interval: decimal(&path, "bInterval")?,
+            max_packet_size: hex(&path, "wMaxPacketSize")?,
+            interval: hex(&path, "bInterval")?,
         });
     }
     result.sort_by_key(|e| e.address);

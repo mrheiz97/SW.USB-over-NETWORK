@@ -96,5 +96,17 @@ on close, a busy kernel driver, and retry after a failed release. The DragonBoar
 regression test repeated the three standard reads with `usb-storage` bound.
 Claim and release were exercised only in the simulator.
 
-Next steps include cancellation of in-flight kernel transfers, and bulk and
-interrupt transfers.
+## M2 endpoint read planning
+
+`plan-read` resolves Bulk and Interrupt IN endpoints from active sysfs
+interfaces. It rejects endpoint zero, OUT addresses, ambiguous matches and
+payloads outside 1–16384 bytes. The plan is a snapshot and cannot submit a
+transfer. Native endpoint packet size and interval use hexadecimal sysfs
+values.
+
+The simulator resolved both transfer types. On the DragonBoard, the planner
+resolved the Intenso stick's Bulk IN endpoint `81` on interface 0 with a
+512-byte maximum packet and left `usb-storage` bound.
+
+Next steps include tying plans to an owned, current connection and implementing
+endpoint data transfers with cancellation of in-flight kernel transfers.

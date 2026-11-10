@@ -49,6 +49,15 @@ Linux requires read and write access to the usbfs device node for the ioctl.
 `read-device` prints the device descriptor. `read-controls` reads the
 descriptor, active configuration, and device status over one connection.
 
+To inspect a Bulk or Interrupt IN read plan using the simulator:
+
+```sh
+cargo run -p swusb-linux-agent -- plan-read 001 002 81 8 tests/usb-simulator/sysfs
+```
+
+This command uses inventory only. It reports the active interface, transfer
+type, packet size and requested length.
+
 See [development status](docs/development/m1-status.md), the
 [architecture](docs/architecture/m1-native-core.md), and
 [contributing guide](CONTRIBUTING.md).

@@ -1,6 +1,7 @@
 use std::{env, path::Path};
 
 use swusb_usb_linux::control::{ControlDevice, ControlQueue, ControlRead, read};
+use swusb_usb_linux::endpoint::plan_read;
 
 fn main() {
     let args: Vec<_> = env::args().skip(1).collect();
@@ -12,9 +13,24 @@ fn main() {
             read_controls(bus, address, command == "read-controls");
             return;
         }
+        [command, bus, address, endpoint, length, root @ ..]
+            if command == "plan-read" && root.len() <= 1 =>
+        {
+            let root = root
+                .first()
+                .map_or(swusb_usb_linux::DEFAULT_SYSFS_ROOT, String::as_str);
+            if let Err(error) = print_read_plan(Path::new(root), bus, address, endpoint, length) {
+                eprintln!("USB endpoint plan failed: {error}");
+                std::process::exit(1);
+            }
+            return;
+        }
         _ => {
             eprintln!(
                 "usage: swusb-linux-agent [list [SYSFS_ROOT] | read-device BUS ADDRESS | read-controls BUS ADDRESS]"
+            );
+            eprintln!(
+                "       swusb-linux-agent plan-read BUS ADDRESS ENDPOINT_HEX LENGTH [SYSFS_ROOT]"
             );
             std::process::exit(2);
         }
@@ -67,6 +83,37 @@ fn main() {
             std::process::exit(1);
         }
     }
+}
+
+fn print_read_plan(
+    root: &Path,
+    bus: &str,
+    address: &str,
+    endpoint: &str,
+    length: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let (bus, address) = (bus.parse()?, address.parse()?);
+    let endpoint = u8::from_str_radix(endpoint.trim_start_matches("0x"), 16)?;
+    let length = length.parse()?;
+    let devices = swusb_usb_linux::enumerate(root)?;
+    let mut matches = devices
+        .iter()
+        .filter(|device| (device.bus_number, device.device_number) == (bus, address));
+    let device = matches.next().ok_or("USB device not found")?;
+    if matches.next().is_some() {
+        return Err("USB device address is ambiguous".into());
+    }
+    let plan = plan_read(device, endpoint, length)?;
+    println!(
+        "Plan: {:?} IN endpoint {:02x}, interface {} alt {}, {} bytes, max packet {}",
+        plan.kind,
+        plan.endpoint,
+        plan.interface,
+        plan.alternate_setting,
+        plan.length,
+        plan.max_packet_size
+    );
+    Ok(())
 }
 
 fn read_controls(bus: &str, address: &str, batch: bool) {
