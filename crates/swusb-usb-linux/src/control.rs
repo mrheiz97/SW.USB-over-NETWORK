@@ -78,6 +78,9 @@ enum InterfaceOperation {
 trait Backend: Send {
     fn submit(&mut self, setup: Setup, timeout_ms: u32, data: &mut [u8]) -> io::Result<usize>;
     fn change_claim(&mut self, operation: InterfaceOperation, interface: u8) -> io::Result<()>;
+    fn seal_claims(&mut self) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
 }
 
 /// A handle to one USB device connection, kept open across standard reads.
@@ -87,6 +90,7 @@ trait Backend: Send {
 pub struct ControlDevice {
     backend: Box<dyn Backend>,
     claimed: BTreeMap<u8, Arc<()>>,
+    claims_sealed: bool,
 }
 
 impl ControlDevice {
@@ -105,6 +109,7 @@ impl ControlDevice {
         Self {
             backend: Box::new(backend),
             claimed: BTreeMap::new(),
+            claims_sealed: false,
         }
     }
 
@@ -113,13 +118,19 @@ impl ControlDevice {
     ///
     /// # Errors
     ///
-    /// Returns `AlreadyExists` for a duplicate local claim, or an OS error
-    /// if the interface cannot be claimed.
+    /// Returns `AlreadyExists` for a duplicate local claim, `PermissionDenied`
+    /// if claims are sealed, or an OS error if the interface cannot be claimed.
     pub fn claim_interface(&mut self, interface: u8) -> io::Result<()> {
         if self.claimed.contains_key(&interface) {
             return Err(io::Error::new(
                 io::ErrorKind::AlreadyExists,
                 "USB interface is already claimed by this handle",
+            ));
+        }
+        if self.claims_sealed {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "new USB interface claims are sealed on this handle",
             ));
         }
         self.backend
@@ -145,6 +156,23 @@ impl ControlDevice {
         self.backend
             .change_claim(InterfaceOperation::Release, interface)?;
         self.claimed.remove(&interface);
+        Ok(())
+    }
+
+    /// Permanently blocks new claims on this handle, including implicit
+    /// claims by usbfs. Existing claims can still be released.
+    ///
+    /// Calling this again on a sealed handle succeeds without another ioctl.
+    ///
+    /// # Errors
+    ///
+    /// Returns an OS or backend error if sealing fails. The handle remains
+    /// unsealed in that case.
+    pub fn seal_claims(&mut self) -> io::Result<()> {
+        if !self.claims_sealed {
+            self.backend.seal_claims()?;
+            self.claims_sealed = true;
+        }
         Ok(())
     }
 

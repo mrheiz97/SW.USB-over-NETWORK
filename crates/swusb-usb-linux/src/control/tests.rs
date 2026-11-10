@@ -257,14 +257,17 @@ fn queued_reads_keep_their_timeout_and_original_connection() {
     );
 }
 
+#[derive(Default)]
 struct SimulatedInterface {
     owner: Option<u8>,
     fail_release: bool,
+    fail_seal: bool,
 }
 
 struct InterfaceHandle {
     state: Arc<Mutex<SimulatedInterface>>,
     id: u8,
+    sealed: bool,
 }
 
 impl Backend for InterfaceHandle {
@@ -274,6 +277,10 @@ impl Backend for InterfaceHandle {
 
     fn change_claim(&mut self, operation: InterfaceOperation, interface: u8) -> io::Result<()> {
         assert_eq!(interface, 0);
+        assert!(
+            operation != InterfaceOperation::Claim || !self.sealed,
+            "sealed handles must reject new claims before calling the backend"
+        );
         let mut state = self.state.lock().unwrap();
         match operation {
             InterfaceOperation::Claim if state.owner.is_some() => {
@@ -288,6 +295,15 @@ impl Backend for InterfaceHandle {
                 state.owner = None;
             }
         }
+        Ok(())
+    }
+
+    fn seal_claims(&mut self) -> io::Result<()> {
+        assert!(!self.sealed, "successful sealing must not repeat the ioctl");
+        if std::mem::take(&mut self.state.lock().unwrap().fail_seal) {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        self.sealed = true;
         Ok(())
     }
 }
@@ -305,15 +321,13 @@ fn open_interface(state: &Arc<Mutex<SimulatedInterface>>, id: u8) -> ControlDevi
     ControlDevice::with_backend(InterfaceHandle {
         state: Arc::clone(state),
         id,
+        sealed: false,
     })
 }
 
 #[test]
 fn interface_claim_is_exclusive_and_can_be_released_or_closed() {
-    let state = Arc::new(Mutex::new(SimulatedInterface {
-        owner: None,
-        fail_release: false,
-    }));
+    let state = Arc::new(Mutex::new(SimulatedInterface::default()));
     let mut first = open_interface(&state, 1);
     let mut second = open_interface(&state, 2);
 
@@ -341,7 +355,7 @@ fn interface_claim_is_exclusive_and_can_be_released_or_closed() {
 fn interface_busy_preserves_the_existing_driver() {
     let state = Arc::new(Mutex::new(SimulatedInterface {
         owner: Some(0), // owner 0 is the simulated kernel driver
-        fail_release: false,
+        ..SimulatedInterface::default()
     }));
     let mut device = open_interface(&state, 1);
     assert_eq!(
@@ -359,8 +373,8 @@ fn interface_busy_preserves_the_existing_driver() {
 #[test]
 fn failed_interface_release_keeps_the_claim_for_retry() {
     let state = Arc::new(Mutex::new(SimulatedInterface {
-        owner: None,
         fail_release: true,
+        ..SimulatedInterface::default()
     }));
     let mut device = open_interface(&state, 1);
     device.claim_interface(0).unwrap();
@@ -375,4 +389,47 @@ fn failed_interface_release_keeps_the_claim_for_retry() {
     assert_eq!(state.lock().unwrap().owner, Some(1));
     device.release_interface(0).unwrap();
     assert_eq!(state.lock().unwrap().owner, None);
+}
+
+#[test]
+fn sealing_keeps_existing_claims_and_prevents_reacquisition() {
+    let state = Arc::new(Mutex::new(SimulatedInterface::default()));
+    let mut sealed = open_interface(&state, 1);
+    let mut other = open_interface(&state, 2);
+    sealed.claim_interface(0).unwrap();
+    sealed.seal_claims().unwrap();
+    sealed.seal_claims().unwrap();
+    assert_eq!(state.lock().unwrap().owner, Some(1));
+    assert_eq!(
+        other.claim_interface(0).unwrap_err().kind(),
+        io::ErrorKind::ResourceBusy
+    );
+    sealed.release_interface(0).unwrap();
+    assert_eq!(
+        sealed.claim_interface(0).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    other.claim_interface(0).unwrap();
+    other.release_interface(0).unwrap();
+}
+
+#[test]
+fn a_failed_seal_can_be_retried_and_does_not_change_claims() {
+    let state = Arc::new(Mutex::new(SimulatedInterface {
+        fail_seal: true,
+        ..SimulatedInterface::default()
+    }));
+    let mut device = open_interface(&state, 1);
+    assert_eq!(
+        device.seal_claims().unwrap_err().kind(),
+        io::ErrorKind::Interrupted
+    );
+    device.claim_interface(0).unwrap();
+    device.seal_claims().unwrap();
+    assert_eq!(state.lock().unwrap().owner, Some(1));
+    device.release_interface(0).unwrap();
+    assert_eq!(
+        device.claim_interface(0).unwrap_err().kind(),
+        io::ErrorKind::PermissionDenied
+    );
 }

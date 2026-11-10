@@ -28,6 +28,8 @@ type IoctlRequest = std::ffi::c_ulong;
 const USBDEVFS_CONTROL: u32 = (3 << 30) | (ctrl_size() << 16) | (b'U' as u32) << 8;
 // Linux UAPI: _IOR('U', 15 or 16, unsigned int).
 const USBDEVFS_INTERFACE_BASE: u32 = (2 << 30) | (4 << 16) | (b'U' as u32) << 8;
+// Linux UAPI: _IOW('U', 30, __u32).
+const USBDEVFS_DROP_PRIVILEGES: u32 = (1 << 30) | (4 << 16) | (b'U' as u32) << 8 | 30;
 
 const fn ctrl_size() -> u32 {
     if size_of::<*mut c_void>() == 8 {
@@ -54,6 +56,7 @@ pub(super) struct Device(File);
 enum Request<'a> {
     Control(&'a mut CtrlTransfer),
     Interface(InterfaceOperation, &'a c_uint),
+    SealClaims,
 }
 
 impl Device {
@@ -70,6 +73,7 @@ impl Device {
     }
 
     fn ioctl(&self, request: Request<'_>) -> io::Result<usize> {
+        let deny_all_claims = 0_u32;
         let (code, arg): (u32, *const c_void) = match request {
             Request::Control(transfer) => (USBDEVFS_CONTROL, ptr::from_mut(transfer).cast()),
             Request::Interface(operation, interface) => {
@@ -82,6 +86,10 @@ impl Device {
                     ptr::from_ref(interface).cast(),
                 )
             }
+            Request::SealClaims => (
+                USBDEVFS_DROP_PRIVILEGES,
+                ptr::from_ref(&deny_all_claims).cast(),
+            ),
         };
         // ioctl takes signed int on musl, so preserve the high direction bits.
         #[cfg(target_env = "musl")]
@@ -90,7 +98,8 @@ impl Device {
         let code = IoctlRequest::from(code);
         // SAFETY: this file stays open and Request selects the UAPI code and
         // its matching aligned argument. Control's writable buffer covers
-        // wLength bytes. Interface arguments are read-only unsigned ints.
+        // wLength bytes. Interface arguments and the zero privilege mask
+        // are initialized, read-only 32-bit integers.
         // The synchronous ioctl retains none of these pointers.
         #[allow(unsafe_code)]
         let result = unsafe { ioctl(self.0.as_raw_fd(), code, arg) };
@@ -122,6 +131,11 @@ impl Backend for Device {
         self.ioctl(Request::Interface(operation, &c_uint::from(interface)))?;
         Ok(())
     }
+
+    fn seal_claims(&mut self) -> io::Result<()> {
+        self.ioctl(Request::SealClaims)?;
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -135,4 +149,6 @@ fn non_usb_character_device_rejects_ioctl() {
         .submit(ControlRead::DeviceDescriptor.setup(), 500, &mut data)
         .unwrap_err();
     assert_eq!(error.raw_os_error(), Some(25)); // Linux ENOTTY
+    let error = device.seal_claims().unwrap_err();
+    assert_eq!(error.raw_os_error(), Some(25));
 }

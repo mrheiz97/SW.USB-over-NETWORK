@@ -121,9 +121,12 @@ bus, address and endpoint. Rejected reads leave the next response intact.
 
 The Linux endpoint path must enforce explicit ownership at submission.
 Linux usbfs can attempt an implicit claim if the kernel no longer recognizes
-the claim when an endpoint request arrives. A candidate Linux design is
-to acquire the explicitly requested interfaces, then apply
-`USBDEVFS_DROP_PRIVILEGES` with a zero mask on that handle. This preserves
-existing claims and prevents new ones, including implicit reclaims. The
-transition is irreversible for that handle. Kernel transfers and
-cancellation of in-flight transfers remain pending.
+the claim when an endpoint request arrives. After claiming the interfaces
+explicitly, `ControlDevice::seal_claims` uses `USBDEVFS_DROP_PRIVILEGES`
+with a zero mask on that handle. The kernel copies an initialized, aligned
+32-bit mask during the synchronous ioctl. The argument and file descriptor
+remain valid until it returns. The kernel keeps existing claims and prevents
+new ones, including implicit reclaims. Releases remain possible, and a
+released interface cannot be reclaimed on that handle. A failed ioctl leaves
+the connection unsealed. Kernel endpoint transfers and cancellation of
+in-flight transfers remain pending.
