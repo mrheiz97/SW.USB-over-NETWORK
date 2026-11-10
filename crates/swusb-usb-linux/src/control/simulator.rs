@@ -1,29 +1,15 @@
-use std::{collections::VecDeque, io, sync::Arc};
+use std::{collections::VecDeque, io};
 use swusb_core::UsbDevice;
 
-use super::{Backend, Cancellation, ControlDevice, InterfaceOperation, Setup, validate_timeout};
-use crate::endpoint::{EndpointReadPlan, plan_read};
+use super::{
+    Backend, Cancellation, ControlDevice, InterfaceOperation, PreparedEndpointRead, Setup,
+};
+use crate::endpoint::plan_read;
 
 struct Input {
     endpoint: u8,
     bytes: Vec<u8>,
     response_after_ms: u32,
-}
-
-/// A Bulk or Interrupt read bound to one simulated interface claim.
-#[derive(Debug)]
-pub struct PreparedEndpointRead {
-    plan: EndpointReadPlan,
-    timeout_ms: u32,
-    claim: Arc<()>,
-}
-
-impl PreparedEndpointRead {
-    /// Returns the inventory metadata for this request.
-    #[must_use]
-    pub fn plan(&self) -> EndpointReadPlan {
-        self.plan
-    }
 }
 
 /// One offline USB connection with scripted Bulk and Interrupt IN responses.
@@ -124,22 +110,7 @@ impl SimulatedDevice {
         timeout_ms: u32,
     ) -> io::Result<PreparedEndpointRead> {
         let plan = plan_read(&self.inventory, endpoint, length)?;
-        validate_timeout(timeout_ms)?;
-        let claim = self
-            .connection
-            .claimed
-            .get(&plan.interface)
-            .ok_or_else(|| {
-                io::Error::new(
-                    io::ErrorKind::PermissionDenied,
-                    "claim the endpoint's interface before reading",
-                )
-            })?;
-        Ok(PreparedEndpointRead {
-            plan,
-            timeout_ms,
-            claim: Arc::clone(claim),
-        })
+        self.connection.prepare_read_on_claim(plan, timeout_ms)
     }
 
     /// Runs a prepared read on its original claim.
@@ -158,17 +129,7 @@ impl SimulatedDevice {
         cancellation: &Cancellation,
     ) -> io::Result<Vec<u8>> {
         let plan = request.plan;
-        if !self
-            .connection
-            .claimed
-            .get(&plan.interface)
-            .is_some_and(|claim| Arc::ptr_eq(claim, &request.claim))
-        {
-            return Err(io::Error::new(
-                io::ErrorKind::PermissionDenied,
-                "endpoint read no longer belongs to the active interface claim",
-            ));
-        }
+        self.connection.validate_read_claim(request)?;
         cancellation.check()?;
         let (index, input) = self
             .inputs

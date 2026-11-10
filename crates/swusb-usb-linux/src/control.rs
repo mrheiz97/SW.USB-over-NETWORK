@@ -9,10 +9,14 @@ use std::{
     },
 };
 
+mod endpoint_read;
 mod queue;
 mod simulator;
+pub use endpoint_read::PreparedEndpointRead;
 pub use queue::{ControlCompletion, ControlQueue};
-pub use simulator::{PreparedEndpointRead, SimulatedDevice};
+pub use simulator::SimulatedDevice;
+
+use crate::endpoint::EndpointReadPlan;
 
 /// The device-recipient standard reads supported by the first transfer backend.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -79,6 +83,12 @@ trait Backend: Send {
     fn submit(&mut self, setup: Setup, timeout_ms: u32, data: &mut [u8]) -> io::Result<usize>;
     fn change_claim(&mut self, operation: InterfaceOperation, interface: u8) -> io::Result<()>;
     fn seal_claims(&mut self) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    fn validate_endpoint(&mut self, _: EndpointReadPlan) -> io::Result<()> {
+        Err(io::ErrorKind::Unsupported.into())
+    }
+    fn submit_endpoint(&mut self, _: EndpointReadPlan, _: u32, _: &mut [u8]) -> io::Result<usize> {
         Err(io::ErrorKind::Unsupported.into())
     }
 }

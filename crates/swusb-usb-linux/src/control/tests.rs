@@ -433,3 +433,126 @@ fn a_failed_seal_can_be_retried_and_does_not_change_claims() {
         io::ErrorKind::PermissionDenied
     );
 }
+
+struct EndpointBackend {
+    valid: bool,
+    outcome: Result<usize, io::ErrorKind>,
+}
+
+impl Backend for EndpointBackend {
+    fn submit(&mut self, _: Setup, _: u32, _: &mut [u8]) -> io::Result<usize> {
+        unreachable!("endpoint tests use backend preflight")
+    }
+
+    fn change_claim(&mut self, _: InterfaceOperation, _: u8) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn seal_claims(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    fn validate_endpoint(&mut self, _: EndpointReadPlan) -> io::Result<()> {
+        if self.valid {
+            Ok(())
+        } else {
+            Err(io::ErrorKind::InvalidData.into())
+        }
+    }
+
+    fn submit_endpoint(
+        &mut self,
+        plan: EndpointReadPlan,
+        timeout_ms: u32,
+        data: &mut [u8],
+    ) -> io::Result<usize> {
+        assert!(self.valid, "invalid preflight must prevent submission");
+        assert_eq!(plan, ENDPOINT_PLAN);
+        assert_eq!(timeout_ms, 500);
+        assert_eq!(data.len(), ENDPOINT_PLAN.length);
+        data.fill(0x5a);
+        self.outcome.map_err(io::Error::from)
+    }
+}
+
+const ENDPOINT_PLAN: EndpointReadPlan = EndpointReadPlan {
+    kind: crate::endpoint::EndpointReadKind::Bulk,
+    interface: 1,
+    alternate_setting: 0,
+    endpoint: 0x82,
+    max_packet_size: 512,
+    length: 8,
+};
+
+#[test]
+fn endpoint_reads_require_sealing_and_exactly_one_claim() {
+    let mut device = ControlDevice::with_backend(EndpointBackend {
+        valid: false,
+        outcome: Ok(0),
+    });
+    device.claim_interface(1).unwrap();
+    assert_eq!(
+        device
+            .prepare_endpoint_read(ENDPOINT_PLAN, 500)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    device.claim_interface(2).unwrap();
+    device.seal_claims().unwrap();
+    assert_eq!(
+        device
+            .prepare_endpoint_read(ENDPOINT_PLAN, 500)
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+    device.release_interface(2).unwrap();
+    let request = device.prepare_endpoint_read(ENDPOINT_PLAN, 500).unwrap();
+    assert_eq!(
+        device
+            .run_endpoint_read(&request, &Cancellation::default())
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::InvalidData
+    );
+    device.release_interface(1).unwrap();
+    assert_eq!(
+        device
+            .run_endpoint_read(&request, &Cancellation::default())
+            .unwrap_err()
+            .kind(),
+        io::ErrorKind::PermissionDenied
+    );
+}
+
+#[test]
+fn endpoint_reads_validate_lengths_and_propagate_transport_errors() {
+    for (outcome, expected) in [
+        (Ok(0), Ok(vec![])),
+        (Ok(3), Ok(vec![0x5a; 3])),
+        (Ok(9), Err(io::ErrorKind::InvalidData)),
+        (Err(io::ErrorKind::TimedOut), Err(io::ErrorKind::TimedOut)),
+    ] {
+        let mut device = ControlDevice::with_backend(EndpointBackend {
+            valid: true,
+            outcome,
+        });
+        device.claim_interface(1).unwrap();
+        device.seal_claims().unwrap();
+        let request = device.prepare_endpoint_read(ENDPOINT_PLAN, 500).unwrap();
+        let cancelled = Cancellation::default();
+        cancelled.cancel();
+        assert_eq!(
+            device
+                .run_endpoint_read(&request, &cancelled)
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::Interrupted
+        );
+        let actual = device
+            .run_endpoint_read(&request, &Cancellation::default())
+            .map_err(|error| error.kind());
+        assert_eq!(actual, expected);
+    }
+}

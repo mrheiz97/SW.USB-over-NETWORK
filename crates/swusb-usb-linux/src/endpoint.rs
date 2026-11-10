@@ -23,16 +23,7 @@ pub struct EndpointReadPlan {
     pub length: usize,
 }
 
-/// Resolves an IN endpoint in the device's active interface inventory.
-///
-/// The plan describes a snapshot. A caller must revalidate the connection
-/// before using it for I/O.
-///
-/// # Errors
-///
-/// Returns an error for invalid addresses or lengths, a missing or ambiguous
-/// endpoint, malformed inventory, or an unsupported transfer type.
-pub fn plan_read(device: &UsbDevice, endpoint: u8, length: usize) -> io::Result<EndpointReadPlan> {
+pub(crate) fn validate_read_parameters(endpoint: u8, length: usize) -> io::Result<()> {
     if !(0x81..=0x8f).contains(&endpoint) {
         return Err(io::Error::new(
             io::ErrorKind::InvalidInput,
@@ -45,6 +36,20 @@ pub fn plan_read(device: &UsbDevice, endpoint: u8, length: usize) -> io::Result<
             "endpoint read length must be 1..=16384 bytes",
         ));
     }
+    Ok(())
+}
+
+/// Resolves an IN endpoint in the device's active interface inventory.
+///
+/// The plan describes a snapshot. A caller must revalidate the connection
+/// before using it for I/O.
+///
+/// # Errors
+///
+/// Returns an error for invalid addresses or lengths, a missing or ambiguous
+/// endpoint, malformed inventory, or an unsupported transfer type.
+pub fn plan_read(device: &UsbDevice, endpoint: u8, length: usize) -> io::Result<EndpointReadPlan> {
+    validate_read_parameters(endpoint, length)?;
     let mut matched = None;
     let mut interfaces = [false; 256];
     for interface in &device.interfaces {

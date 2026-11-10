@@ -128,5 +128,29 @@ with a zero mask on that handle. The kernel copies an initialized, aligned
 remain valid until it returns. The kernel keeps existing claims and prevents
 new ones, including implicit reclaims. Releases remain possible, and a
 released interface cannot be reclaimed on that handle. A failed ioctl leaves
-the connection unsealed. Kernel endpoint transfers and cancellation of
-in-flight transfers remain pending.
+the connection unsealed.
+
+## M2 Linux endpoint reads
+
+A caller explicitly claims one interface, seals the handle, then uses
+`prepare_endpoint_read` and `run_endpoint_read` on that connection.
+The backend reads at most 128 KiB of cached descriptors from the same fd.
+It checks the active configuration and alternate setting using bounded
+standard IN control requests. It rejects a changed endpoint type, packet
+size, or an address that also occurs on another interface in the active
+configuration. These checks do not lock out external reconfiguration.
+If the kernel no longer recognizes the claim, the sealed handle cannot
+acquire it again.
+
+Linux uses the synchronous `USBDEVFS_BULK` ioctl for both Bulk and Interrupt
+IN endpoints. The C layout contains three 32-bit fields followed by the
+buffer pointer. Compile-time assertions verify the offsets and total size.
+The private request pairs this ioctl with its aligned C argument. The
+open fd and writable buffer stay alive until the ioctl returns. The address
+is a nonzero IN endpoint, and the buffer covers exactly the bounded
+requested length. The kernel retains no pointers. The transfer accepts
+short responses, including zero bytes, and rejects oversized counts.
+
+The transfer timeout excludes the descriptor and control preflight. A
+cancellation observed after submission discards the returned data.
+Cancellation of an in-flight kernel transfer remains pending.

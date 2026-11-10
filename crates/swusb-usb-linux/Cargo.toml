@@ -6,6 +6,7 @@ license.workspace = true
 
 [dependencies]
 swusb-core = { path = "../swusb-core" }
+swusb-descriptors = { path = "../swusb-descriptors" }
 
 [lints]
 workspace = true
