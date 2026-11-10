@@ -1,5 +1,27 @@
 use super::*;
-use std::{sync::Arc, thread};
+use std::{
+    sync::{Arc, Mutex},
+    thread,
+};
+
+fn read_device(
+    submit: impl FnMut(Setup, u32, &mut [u8]) -> io::Result<usize> + Send + 'static,
+) -> ControlDevice {
+    ControlDevice::with_backend(submit)
+}
+
+impl<F> Backend for F
+where
+    F: FnMut(Setup, u32, &mut [u8]) -> io::Result<usize> + Send,
+{
+    fn submit(&mut self, setup: Setup, timeout_ms: u32, data: &mut [u8]) -> io::Result<usize> {
+        self(setup, timeout_ms, data)
+    }
+
+    fn change_claim(&mut self, _: InterfaceOperation, _: u8) -> io::Result<()> {
+        panic!("control reads must not change interface ownership")
+    }
+}
 
 #[test]
 fn reads_standard_requests_from_simulated_hid() {
@@ -62,20 +84,18 @@ impl SimulatedPort {
 
     fn open(&self) -> io::Result<ControlDevice> {
         let (connected, configuration) = self.connection.clone().ok_or(io::ErrorKind::NotFound)?;
-        Ok(ControlDevice {
-            submit: Box::new(move |setup, timeout, data| {
-                if !connected.load(Ordering::Relaxed) {
-                    return Err(io::ErrorKind::NotConnected.into());
-                }
-                assert_eq!(setup, ControlRead::ConfigurationValue.setup());
-                // A deterministic 200 ms device response, with no wall-clock sleep.
-                if timeout < 200 {
-                    return Err(io::ErrorKind::TimedOut.into());
-                }
-                data.copy_from_slice(&[configuration]);
-                Ok(data.len())
-            }),
-        })
+        Ok(read_device(move |setup, timeout, data| {
+            if !connected.load(Ordering::Relaxed) {
+                return Err(io::ErrorKind::NotConnected.into());
+            }
+            assert_eq!(setup, ControlRead::ConfigurationValue.setup());
+            // A deterministic 200 ms device response, with no wall-clock sleep.
+            if timeout < 200 {
+                return Err(io::ErrorKind::TimedOut.into());
+            }
+            data.copy_from_slice(&[configuration]);
+            Ok(data.len())
+        }))
     }
 }
 
@@ -119,9 +139,7 @@ fn timeout_leaves_the_handle_usable_for_a_fresh_read() {
 fn cancellation_before_submission_skips_the_backend() {
     let signal = Cancellation::default();
     signal.cancel();
-    let mut device = ControlDevice {
-        submit: Box::new(|_, _, _| panic!("cancelled read must not submit")),
-    };
+    let mut device = read_device(|_, _, _| panic!("cancelled read must not submit"));
     let result = device.read_cancellable(ControlRead::DeviceStatus, 500, &signal);
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
 }
@@ -130,13 +148,11 @@ fn cancellation_before_submission_skips_the_backend() {
 fn cancellation_during_submission_discards_the_response() {
     let signal = Arc::new(Cancellation::default());
     let in_flight = Arc::clone(&signal);
-    let mut device = ControlDevice {
-        submit: Box::new(move |_, _, data| {
-            thread::scope(|scope| scope.spawn(|| in_flight.cancel()).join().unwrap());
-            data.copy_from_slice(&[1]);
-            Ok(data.len())
-        }),
-    };
+    let mut device = read_device(move |_, _, data| {
+        thread::scope(|scope| scope.spawn(|| in_flight.cancel()).join().unwrap());
+        data.copy_from_slice(&[1]);
+        Ok(data.len())
+    });
     let read = ControlRead::ConfigurationValue;
     let result = device.read_cancellable(read, 500, &signal);
     assert_eq!(result.unwrap_err().kind(), io::ErrorKind::Interrupted);
@@ -194,15 +210,13 @@ fn queue_preserves_order_and_skips_a_cancelled_request() {
     use ControlRead::{ConfigurationValue, DeviceDescriptor, DeviceStatus};
 
     let mut submitted = [DeviceDescriptor, DeviceStatus].into_iter();
-    let mut queue = ControlQueue::new(ControlDevice {
-        submit: Box::new(move |setup, _, data| {
-            assert_eq!(setup, submitted.next().unwrap().setup());
-            if setup.request == 6 {
-                data[..2].copy_from_slice(&[18, 1]);
-            }
-            Ok(data.len())
-        }),
-    });
+    let mut queue = ControlQueue::new(read_device(move |setup, _, data| {
+        assert_eq!(setup, submitted.next().unwrap().setup());
+        if setup.request == 6 {
+            data[..2].copy_from_slice(&[18, 1]);
+        }
+        Ok(data.len())
+    }));
     queue.enqueue(DeviceDescriptor, 500).unwrap();
     let cancelled = queue.enqueue(ConfigurationValue, 500).unwrap();
     queue.enqueue(DeviceStatus, 500).unwrap();
@@ -241,4 +255,124 @@ fn queued_reads_keep_their_timeout_and_original_connection() {
         queue.run_next().unwrap().result.unwrap_err().kind(),
         io::ErrorKind::NotConnected
     );
+}
+
+struct SimulatedInterface {
+    owner: Option<u8>,
+    fail_release: bool,
+}
+
+struct InterfaceHandle {
+    state: Arc<Mutex<SimulatedInterface>>,
+    id: u8,
+}
+
+impl Backend for InterfaceHandle {
+    fn submit(&mut self, _: Setup, _: u32, _: &mut [u8]) -> io::Result<usize> {
+        panic!("claim and release must not submit control transfers")
+    }
+
+    fn change_claim(&mut self, operation: InterfaceOperation, interface: u8) -> io::Result<()> {
+        assert_eq!(interface, 0);
+        let mut state = self.state.lock().unwrap();
+        match operation {
+            InterfaceOperation::Claim if state.owner.is_some() => {
+                return Err(io::ErrorKind::ResourceBusy.into());
+            }
+            InterfaceOperation::Claim => state.owner = Some(self.id),
+            InterfaceOperation::Release => {
+                assert_eq!(state.owner, Some(self.id));
+                if std::mem::take(&mut state.fail_release) {
+                    return Err(io::ErrorKind::Interrupted.into());
+                }
+                state.owner = None;
+            }
+        }
+        Ok(())
+    }
+}
+
+impl Drop for InterfaceHandle {
+    fn drop(&mut self) {
+        let mut state = self.state.lock().unwrap();
+        if state.owner == Some(self.id) {
+            state.owner = None;
+        }
+    }
+}
+
+fn open_interface(state: &Arc<Mutex<SimulatedInterface>>, id: u8) -> ControlDevice {
+    ControlDevice::with_backend(InterfaceHandle {
+        state: Arc::clone(state),
+        id,
+    })
+}
+
+#[test]
+fn interface_claim_is_exclusive_and_can_be_released_or_closed() {
+    let state = Arc::new(Mutex::new(SimulatedInterface {
+        owner: None,
+        fail_release: false,
+    }));
+    let mut first = open_interface(&state, 1);
+    let mut second = open_interface(&state, 2);
+
+    first.claim_interface(0).unwrap();
+    assert_eq!(
+        first.claim_interface(0).unwrap_err().kind(),
+        io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(
+        second.claim_interface(0).unwrap_err().kind(),
+        io::ErrorKind::ResourceBusy
+    );
+    assert_eq!(
+        second.release_interface(0).unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
+    first.release_interface(0).unwrap();
+    second.claim_interface(0).unwrap();
+    drop(second);
+    first.claim_interface(0).unwrap();
+    first.release_interface(0).unwrap();
+}
+
+#[test]
+fn interface_busy_preserves_the_existing_driver() {
+    let state = Arc::new(Mutex::new(SimulatedInterface {
+        owner: Some(0), // owner 0 is the simulated kernel driver
+        fail_release: false,
+    }));
+    let mut device = open_interface(&state, 1);
+    assert_eq!(
+        device.claim_interface(0).unwrap_err().kind(),
+        io::ErrorKind::ResourceBusy
+    );
+    assert_eq!(
+        device.release_interface(0).unwrap_err().kind(),
+        io::ErrorKind::NotFound
+    );
+    drop(device);
+    assert_eq!(state.lock().unwrap().owner, Some(0));
+}
+
+#[test]
+fn failed_interface_release_keeps_the_claim_for_retry() {
+    let state = Arc::new(Mutex::new(SimulatedInterface {
+        owner: None,
+        fail_release: true,
+    }));
+    let mut device = open_interface(&state, 1);
+    device.claim_interface(0).unwrap();
+    assert_eq!(
+        device.release_interface(0).unwrap_err().kind(),
+        io::ErrorKind::Interrupted
+    );
+    assert_eq!(
+        device.claim_interface(0).unwrap_err().kind(),
+        io::ErrorKind::AlreadyExists
+    );
+    assert_eq!(state.lock().unwrap().owner, Some(1));
+    device.release_interface(0).unwrap();
+    assert_eq!(state.lock().unwrap().owner, None);
 }

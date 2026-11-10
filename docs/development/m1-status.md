@@ -76,5 +76,25 @@ uses this queue for all three standard reads.
 On the DragonBoard, `read-controls` returned the Intenso stick's descriptor,
 configuration `01`, and status `00 00` with `usb-storage` bound throughout.
 
-Next steps include interface ownership, cancellation of in-flight kernel
-transfers, and bulk and interrupt transfers.
+## M2 interface ownership
+
+Claim and release are explicit operations on the same open usbfs handle used
+for control reads. A successful claim is recorded once. Duplicate claims
+and releases of unclaimed interfaces are rejected locally. Failed operations
+leave ownership bookkeeping unchanged, so a failed release can be retried.
+Closing the handle lets usbfs release any remaining claims.
+
+The Linux backend uses only `USBDEVFS_CLAIMINTERFACE` and
+`USBDEVFS_RELEASEINTERFACE` for these operations. Both synchronously read an
+initialized, naturally aligned 32-bit `unsigned int` from userspace. The
+file descriptor and argument remain valid until the ioctl returns. The FFI wrapper
+pairs each request with its typed argument, and preserves the OS error.
+An interface already bound to a driver stays with that driver.
+
+Simulator tests cover exclusive ownership, release and reacquisition, cleanup
+on close, a busy kernel driver, and retry after a failed release. The DragonBoard
+regression test repeated the three standard reads with `usb-storage` bound.
+Claim and release were exercised only in the simulator.
+
+Next steps include cancellation of in-flight kernel transfers, and bulk and
+interrupt transfers.

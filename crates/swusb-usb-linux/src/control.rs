@@ -63,14 +63,24 @@ impl Cancellation {
     }
 }
 
-type Submit = dyn FnMut(Setup, u32, &mut [u8]) -> io::Result<usize> + Send;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum InterfaceOperation {
+    Claim,
+    Release,
+}
+
+trait Backend: Send {
+    fn submit(&mut self, setup: Setup, timeout_ms: u32, data: &mut [u8]) -> io::Result<usize>;
+    fn change_claim(&mut self, operation: InterfaceOperation, interface: u8) -> io::Result<()>;
+}
 
 /// A handle to one USB device connection, kept open across standard reads.
 ///
 /// After a disconnect, enumerate again and open a new handle. This handle
 /// continues to refer to the original connection even if its address is reused.
 pub struct ControlDevice {
-    submit: Box<Submit>,
+    backend: Box<dyn Backend>,
+    claimed: [bool; 256],
 }
 
 impl ControlDevice {
@@ -82,9 +92,56 @@ impl ControlDevice {
     /// the node cannot be opened.
     pub fn open(bus: u16, address: u16) -> io::Result<Self> {
         let device = platform::Device::open(&device_path(bus, address)?)?;
-        Ok(Self {
-            submit: Box::new(move |setup, timeout, data| device.submit(setup, timeout, data)),
-        })
+        Ok(Self::with_backend(device))
+    }
+
+    fn with_backend(backend: impl Backend + 'static) -> Self {
+        Self {
+            backend: Box::new(backend),
+            claimed: [false; 256],
+        }
+    }
+
+    /// Claims an interface for this connection. The kernel rejects a claim
+    /// when the interface already belongs to a driver or another handle.
+    ///
+    /// # Errors
+    ///
+    /// Returns `AlreadyExists` for a duplicate local claim, or an OS error
+    /// if the interface cannot be claimed.
+    pub fn claim_interface(&mut self, interface: u8) -> io::Result<()> {
+        let claimed = &mut self.claimed[usize::from(interface)];
+        if *claimed {
+            return Err(io::Error::new(
+                io::ErrorKind::AlreadyExists,
+                "USB interface is already claimed by this handle",
+            ));
+        }
+        self.backend
+            .change_claim(InterfaceOperation::Claim, interface)?;
+        *claimed = true;
+        Ok(())
+    }
+
+    /// Releases a claim held by this connection. Closing the connection also
+    /// releases its claims in usbfs.
+    ///
+    /// # Errors
+    ///
+    /// Returns `NotFound` for an interface this handle did not claim, or an
+    /// OS error if release fails. A failed release leaves the claim recorded.
+    pub fn release_interface(&mut self, interface: u8) -> io::Result<()> {
+        let claimed = &mut self.claimed[usize::from(interface)];
+        if !*claimed {
+            return Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                "USB interface is not claimed by this handle",
+            ));
+        }
+        self.backend
+            .change_claim(InterfaceOperation::Release, interface)?;
+        *claimed = false;
+        Ok(())
     }
 
     /// Performs one standard read with a timeout in milliseconds.
@@ -93,7 +150,9 @@ impl ControlDevice {
     ///
     /// Returns an error for invalid timeouts, OS failures, or invalid responses.
     pub fn read(&mut self, request: ControlRead, timeout_ms: u32) -> io::Result<Vec<u8>> {
-        execute(request, timeout_ms, None, &mut self.submit)
+        execute(request, timeout_ms, None, |setup, timeout, data| {
+            self.backend.submit(setup, timeout, data)
+        })
     }
 
     /// Performs a read with cooperative cancellation.
@@ -111,7 +170,12 @@ impl ControlDevice {
         timeout_ms: u32,
         cancellation: &Cancellation,
     ) -> io::Result<Vec<u8>> {
-        execute(request, timeout_ms, Some(cancellation), &mut self.submit)
+        execute(
+            request,
+            timeout_ms,
+            Some(cancellation),
+            |setup, timeout, data| self.backend.submit(setup, timeout, data),
+        )
     }
 }
 
@@ -205,7 +269,7 @@ mod platform;
     )
 )))]
 mod platform {
-    use super::{Setup, io};
+    use super::{Backend, InterfaceOperation, Setup, io};
 
     pub(super) enum Device {}
 
@@ -216,8 +280,14 @@ mod platform {
                 "USB control reads require supported Linux usbfs",
             ))
         }
+    }
 
-        pub(super) fn submit(&self, _: Setup, _: u32, _: &mut [u8]) -> io::Result<usize> {
+    impl Backend for Device {
+        fn submit(&mut self, _: Setup, _: u32, _: &mut [u8]) -> io::Result<usize> {
+            match *self {}
+        }
+
+        fn change_claim(&mut self, _: InterfaceOperation, _: u8) -> io::Result<()> {
             match *self {}
         }
     }
