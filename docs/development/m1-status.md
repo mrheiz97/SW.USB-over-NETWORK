@@ -15,11 +15,30 @@ success.
 - String output is terminal-visible untrusted device data; terminal escape
   sanitization should be added before operational deployments.
 
-## M2 next steps
+## M2 control reads
 
-1. Design a bounded transfer request and completion model with explicit IDs.
-2. Add Linux-only usbfs wrappers for read-only control transfers first.
-3. Define interface claim/release ownership without automatic driver detach.
-4. Implement bounded queues, monotonic deadlines, cancellation, and hotplug.
-5. Add mock-ioctl tests, then isolated hardware tests with harmless devices.
-6. Add bulk and interrupt transfers only after control-path review.
+The first M2 increment uses synchronous `USBDEVFS_CONTROL` on Linux x86, x86-64,
+ARM and AArch64. Only standard device-recipient IN requests for the device
+descriptor, current configuration value and device status are exposed. Each
+request has a fixed response size and a transfer timeout of 1–5000 ms. The CLI
+uses 1000 ms. Bus and device numbers can change after unplugging or reconnecting.
+Use fresh inventory before addressing a device.
+
+Linux requires a read/write file descriptor for the ioctl. Prefer narrow
+device-node permissions. The transfer path leaves interface and driver bindings
+alone. Simulator tests cover setup fields, responses and error propagation.
+
+The Linux FFI boundary uses the C layout and ioctl encoding for the supported
+architectures. Compile-time assertions check the layout. The file descriptor
+stays open and the mutable response buffer remains valid for the whole
+synchronous call. The request length must match the buffer length, and only
+the fixed standard IN requests listed above reach the ioctl.
+
+On a DragonBoard 410c Rev B running Debian 13 on ARM64, the CLI read the complete
+18-byte device descriptor of an Intenso Speed Line USB stick (`24a9:205a`).
+A test client using the same backend read configuration `01`, which matched
+sysfs, and device status `00 00`. The stick's `usb-storage` interface binding
+matched before and after the two reads.
+
+Next steps include interface ownership, bounded queues, cancellation, hotplug,
+and bulk and interrupt transfers.

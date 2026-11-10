@@ -1,16 +1,21 @@
 use std::{env, path::Path};
 
 fn main() {
-    let mut args = env::args().skip(1);
-    let root = match (args.next().as_deref(), args.next()) {
-        (None | Some("list"), None) => Path::new(swusb_usb_linux::DEFAULT_SYSFS_ROOT).to_path_buf(),
-        (Some("list"), Some(path)) => path.into(),
+    let args: Vec<_> = env::args().skip(1).collect();
+    let root = match args.as_slice() {
+        [] => Path::new(swusb_usb_linux::DEFAULT_SYSFS_ROOT),
+        [command] if command == "list" => Path::new(swusb_usb_linux::DEFAULT_SYSFS_ROOT),
+        [command, path] if command == "list" => Path::new(path),
+        [command, bus, address] if command == "read-device" => {
+            read_device(bus, address);
+            return;
+        }
         _ => {
-            eprintln!("usage: swusb-linux-agent [list [SYSFS_ROOT]]");
+            eprintln!("usage: swusb-linux-agent [list [SYSFS_ROOT] | read-device BUS ADDRESS]");
             std::process::exit(2);
         }
     };
-    match swusb_usb_linux::enumerate(&root) {
+    match swusb_usb_linux::enumerate(root) {
         Ok(devices) => {
             if devices.is_empty() {
                 println!("No USB devices found under {}", root.display());
@@ -55,6 +60,22 @@ fn main() {
         }
         Err(error) => {
             eprintln!("USB inventory failed: {error}");
+            std::process::exit(1);
+        }
+    }
+}
+
+fn read_device(bus: &str, address: &str) {
+    use swusb_usb_linux::control::{ControlRead, read};
+
+    let (Ok(bus), Ok(address)) = (bus.parse(), address.parse()) else {
+        eprintln!("BUS and ADDRESS must be decimal USB numbers");
+        std::process::exit(2);
+    };
+    match read(bus, address, ControlRead::DeviceDescriptor, 1000) {
+        Ok(bytes) => println!("Device descriptor: {bytes:02x?}"),
+        Err(error) => {
+            eprintln!("USB control read failed: {error}");
             std::process::exit(1);
         }
     }

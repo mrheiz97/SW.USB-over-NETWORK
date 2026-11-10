@@ -1,4 +1,6 @@
-//! Read-only USB inventory using Linux sysfs. This crate never claims interfaces.
+//! Linux sysfs inventory and read-only USB control transfers.
+
+pub mod control;
 
 use std::{
     fmt, fs, io,

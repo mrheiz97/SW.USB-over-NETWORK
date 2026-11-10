@@ -1,9 +1,7 @@
 # SW.USB
 
-SW.USB is an experimental, vendor-independent USB-over-network platform. The
-current implementation is **Milestone M1: Native USB Core**; it does not yet
-forward USB transfers over a network and must not be represented as a complete
-USB device server.
+SW.USB is an experimental, vendor-independent USB-over-network project. M1
+provides USB inventory. M2 begins with local USB control reads on Linux.
 
 ## Implemented in M1
 
@@ -38,14 +36,16 @@ cargo run -p swusb-linux-agent -- list tests/usb-simulator/sysfs
 The real-device command requires readable `/sys/bus/usb/devices`. It performs
 inventory only and does not open usbfs device nodes or claim interfaces.
 
-## Local contributor setup
+## Read a USB device descriptor on Linux
 
-Private `AGENTS.md` files are ignored and rejected if tracked. Enable the
-provided pre-commit hook after cloning:
+Use the bus and device numbers from `list`:
 
 ```sh
-git config core.hooksPath .githooks
+cargo run -p swusb-linux-agent -- read-device 001 002
 ```
+
+Linux requires read and write access to the usbfs device node for the ioctl.
+The command sends one standard device descriptor read and prints the bytes.
 
 See [development status](docs/development/m1-status.md), the
 [architecture](docs/architecture/m1-native-core.md), and
